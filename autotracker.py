@@ -18,8 +18,8 @@
 
 bl_info = {
     "name": "Autotrack",
-    "author": "Miika Puustinen, Matti Kaihola, Stephen Leger",
-    "version": (0, 1, 1),
+    "author": "Miika Puustinen, Matti Kaihola, Stephen Leger, RUben Begalov@gmail.com",
+    "version": (0, 2, 0),
     "blender": (2, 80, 0),
     "location": "Movie clip Editor > Tools Panel > Autotrack",
     "description": "Motion Tracking with automatic feature detection.",
@@ -31,6 +31,9 @@ bl_info = {
 import bpy
 import bgl
 import blf
+import gpu
+from gpu_extras.batch import batch_for_shader
+
 from bpy.types import (
         Operator,
         Panel,
@@ -47,6 +50,7 @@ from bpy.props import (
 
 # for debug purposes
 import time
+from pprint import pprint
 
 # set to True to enable debug prints
 DEBUG = True
@@ -59,7 +63,6 @@ def debug_print(*args, **kwargs):
         print(*args, **kwargs)
 
 
-# http://blenderscripting.blogspot.ch/2011/07/bgl-drawing-with-opengl-onto-blender-25.html
 class GlDrawOnScreen():
     black = (0.0, 0.0, 0.0, 0.7)
     white = (1.0, 1.0, 1.0, 0.5)
@@ -71,71 +74,80 @@ class GlDrawOnScreen():
             size : font height.
             colour : used for definining the colour'''
         dpi, font_id = 72, 0   # dirty fast assignment
-        bgl.glColor4f(*colour)
         blf.position(font_id, x, y, 0)
         blf.size(font_id, size, dpi)
         blf.draw(font_id, text)
 
     def _end(self):
-        bgl.glEnd()
-        bgl.glPopAttrib()
         bgl.glLineWidth(1)
         bgl.glDisable(bgl.GL_BLEND)
-        bgl.glColor4f(0.0, 0.0, 0.0, 1.0)
 
-    # def _start_line(self, colour, width=2, style=bgl.GL_LINE_STIPPLE):
-    #     bgl.glPushAttrib(bgl.GL_ENABLE_BIT)
-    #     bgl.glLineStipple(1, 0x9999)
-    #     bgl.glEnable(style)
-    #     bgl.glEnable(bgl.GL_BLEND)
-    #     bgl.glColor4f(*colour)
-    #     bgl.glLineWidth(width)
-    #     bgl.glBegin(bgl.GL_LINE_STRIP)
+    def Rectangle(self, x0, y0, x1, y1, colour, width=2, style='LINE_STRIP'):
+        bgl.glEnable(bgl.GL_BLEND)
 
-    # def Rectangle(self, x0, y0, x1, y1, colour, width=2, style=bgl.GL_LINE):
-    #     self._start_line(colour, width, style)
-    #     bgl.glVertex2i(x0, y0)
-    #     bgl.glVertex2i(x1, y0)
-    #     bgl.glVertex2i(x1, y1)
-    #     bgl.glVertex2i(x0, y1)
-    #     bgl.glVertex2i(x0, y0)
-    #     self._end()
+        bgl.glLineWidth(width)
 
-    # def Polygon(self, pts, colour):
-    #     bgl.glPushAttrib(bgl.GL_ENABLE_BIT)
-    #     bgl.glEnable(bgl.GL_BLEND)
-    #     bgl.glColor4f(*colour)
-    #     bgl.glBegin(bgl.GL_POLYGON)
-    #     for pt in pts:
-    #         x, y = pt
-    #         bgl.glVertex2f(x, y)
-    #     self._end()
+        vertices = (
+            (x0, y0),
+            (x1, y0),
+            (x1, y1),
+            (x0, y1),
+            (x0, y0))
+        
+        # 50% alpha, 2 pixel width line
+        shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
 
-    # def ProgressBar(self, x, y, width, height, start, percent):
-    #     x1, y1 = x + width, y + height
-    #     # progress from current point to either start or end
-    #     xs = x + (x1 - x) * float(start)
-    #     if percent > 0:
-    #         # going forward
-    #         xi = xs + (x1 - xs) * float(percent)
-    #     else:
-    #         # going backward
-    #         xi = xs - (x - xs) * float(percent)
-    #     self.Polygon([(xs, y), (xs, y1), (xi, y1), (xi, y)], self.progress_colour)
-    #     self.Rectangle(x, y, x1, y1, self.white, width=1)
+        batch = batch_for_shader(shader, style, {"pos": vertices})
+        shader.bind()
+        shader.uniform_float("color", colour)
+        batch.draw(shader)
+        self._end()
+
+    def Polygon(self, pts, colour, style='TRIS'):
+        bgl.glEnable(bgl.GL_BLEND)
+
+        shader = gpu.shader.from_builtin('2D_UNIFORM_COLOR')
+        vertices = []
+        for pt in pts:
+            x, y = pt
+            vertices.append((abs(x), y))
+        vertices.append(vertices[0])
+        batch = batch_for_shader(shader, style, {"pos": vertices})
+        shader.bind()
+        shader.uniform_float("color", colour)
+        batch.draw(shader)
+        self._end()
+
+    def ProgressBar(self, x, y, width, height, start, percent):
+        x1, y1 = abs( x + width ), abs( y + height )
+        # progress from current point to either start or end
+        xs = abs( x + (x1 - x) * float(start) )
+        if percent > 0:
+            # going forward
+            xi = abs( xs + (x1 - xs) * float(percent) )
+        else:
+            # going backward
+            xi = abs( xs - (x - xs) * float(percent) )
+
+        progress = [(xs, y), (xs, y1), (xi, y1), (xi, y)]
+
+
+        self.Polygon(progress, self.progress_colour)
+        self.Rectangle(x, y, x1, y1, self.white, width=1)
 
 
 def draw_callback(self, context):
-    pass
-    #self.gl.ProgressBar(10, 24, 200, 16, self.start, self.progress)
-    #self.gl.String(str(int(100 * abs(self.progress))) + "% ESC to Stop", 14, 28, 10, self.gl.white)
+    # debug_print("self.progress", self.progress)
+    self.gl.ProgressBar(10, 24, 200, 16, self.start, self.progress)
+    self.gl.String(str(int(100 * abs(self.progress))) + "% ESC to Stop", 14, 28, 10, self.gl.white)
 
 
-class OP_Tracking_auto_tracker(Operator):
+class AT_OP_Tracking(Operator):
     bl_idname = "tracking.auto_track"
     bl_label = "AutoTracking"
     bl_description = ("Start Autotracking, Press Esc to Stop \n"
                       "When stopped, the added Track Markers will be kept")
+    bl_options = {"REGISTER", "UNDO"}
 
     _timer = None
     _draw_handler = None
@@ -170,8 +182,11 @@ class OP_Tracking_auto_tracker(Operator):
 
     def get_vars_from_context(self, context):
         scene = context.scene
-        props = context.window_manager.autotracker_props
-        clip = context.area.spaces.active.clip
+        props = context.window_manager.autotracker
+
+        if context.area.spaces.active.clip:
+            clip = context.area.spaces.active.clip
+
         tracks = clip.tracking.tracks
         current_frame = scene.frame_current
         clip_end = clip.frame_start + clip.frame_duration
@@ -367,6 +382,9 @@ class OP_Tracking_auto_tracker(Operator):
             step = 1
 
         to_split = [None for track in tracks]
+
+        # debug_print("(last_frame, current_frame, step)", (last_frame, current_frame, step))
+
         for frame in range(last_frame, current_frame, step):
 
             last = frame - step
@@ -412,6 +430,7 @@ class OP_Tracking_auto_tracker(Operator):
         return frame_start, frame_end, frame_duration
 
     def modal(self, context, event):
+        
 
         if event.type in {'ESC'}:
             self.report({'INFO'},
@@ -432,11 +451,20 @@ class OP_Tracking_auto_tracker(Operator):
 
         # do not run this modal while tracking operator runs
         # Known issue, you'll have to keep ESC pressed
-        if event.type not in {'TIMER'} or context.scene.frame_current != self.next_frame:
+
+        # PROBLEM ['before event check:', 1173, 1174] self.next_frame > abs(context.scene.frame_current - self.next_frame)
+        # debug_print(["before event check:", context.scene.frame_current, self.next_frame])
+
+        cur_next_dif = abs(context.scene.frame_current - self.next_frame)
+
+        if event.type not in {'TIMER'} or context.scene.frame_current != self.next_frame and cur_next_dif > props.frame_separation: # PATCH!
+
             return {'PASS_THROUGH'}
 
         # prevent own TIMER event while running
         self.stop_timer(context)
+
+        pprint(["after times stoped:", context.scene.frame_current, self.next_frame, props.frame_separation])
 
         if props.track_backwards:
             self.next_frame = scene.frame_current - props.frame_separation
@@ -444,6 +472,8 @@ class OP_Tracking_auto_tracker(Operator):
         else:
             self.next_frame = scene.frame_current + props.frame_separation
             total = frame_end - self.start_frame
+
+        pprint(["after next_frame compute:", context.scene.frame_current, self.next_frame, props.frame_separation])
 
         if total > 0:
             self.progress = (current_frame - self.start_frame) / total
@@ -482,17 +512,21 @@ class OP_Tracking_auto_tracker(Operator):
 
         # setup a timer to broadcast a TIMER event to force modal to
         # re-run as fast as possible (not waiting for any mouse or keyboard event)
+        debug_print("start_timer in modal")
         self.start_timer(context)
 
         return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
+        debug_print("invoke")
         scene = context.scene
         frame_start, frame_end, frame_duration = self.get_frame_range(context)
 
         if scene.frame_current > frame_end:
+            debug_print("scene.frame_current > frame_end")
             scene.frame_current = frame_end
         elif scene.frame_current < frame_start:
+            debug_print("scene.frame_current < frame_start")
             scene.frame_current = frame_start
 
         self.start_frame = scene.frame_current
@@ -508,14 +542,17 @@ class OP_Tracking_auto_tracker(Operator):
                                                         draw_callback, args,
                                                         'WINDOW', 'POST_PIXEL'
                                                         )
+        debug_print("start_timer in invoke")
         self.start_timer(context)
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
     def __init__(self):
+        debug_print("init")
         self.t = time.time()
 
     def __del__(self):
+        debug_print("del")
         debug_print("AutoTrack %.2f seconds" % (time.time() - self.t))
 
     def execute(self, context):
@@ -523,24 +560,30 @@ class OP_Tracking_auto_tracker(Operator):
         return {'FINISHED'}
 
     def stop_timer(self, context):
+        debug_print("stop_timer")
         context.window_manager.event_timer_remove(self._timer)
 
     def start_timer(self, context):
         self._timer = context.window_manager.event_timer_add(time_step=0.1, window=context.window)
 
     def cancel(self, context):
+        debug_print("Canceled.")
         self.stop_timer(context)
         self.show_tracks(context)
         bpy.types.SpaceClipEditor.draw_handler_remove(self._draw_handler, 'WINDOW')
 
     @classmethod
     def poll(cls, context):
-        return (context.area.spaces.active.clip is not None)
+        # return (context.area.spaces.active.clip is not None)
+        return (context.area and context.area.spaces and
+                hasattr(context.area.spaces.active, 'clip') and
+                context.area.spaces.active.clip is not None
+        )
 
 
-class AutotrackerSettings(PropertyGroup):
+class AT_Settings(PropertyGroup):
     """Create properties"""
-    df_margin = FloatProperty(
+    df_margin: FloatProperty(
             name="Detect Features Margin",
             description="Only consider features from pixels located outside\n"
                         "the defined margin from the clip borders",
@@ -549,7 +592,7 @@ class AutotrackerSettings(PropertyGroup):
             min=0,
             max=100
             )
-    df_threshold = FloatProperty(
+    df_threshold: FloatProperty(
             name="Detect Features Threshold",
             description="Threshold level to deem a feature being good enough for tracking",
             default=0.3,
@@ -557,7 +600,7 @@ class AutotrackerSettings(PropertyGroup):
             max=1.0
             )
     # Note: merge this one with delete_threshold
-    df_distance = FloatProperty(
+    df_distance: FloatProperty(
             name="Detect Features Distance",
             description="Minimal acceptable distance between two features",
             subtype='PERCENTAGE',
@@ -565,7 +608,7 @@ class AutotrackerSettings(PropertyGroup):
             min=1,
             max=100
             )
-    delete_threshold = FloatProperty(
+    delete_threshold: FloatProperty(
             name="New Marker Threshold",
             description="Threshold of how close a new features can appear during tracking",
             subtype='PERCENTAGE',
@@ -573,7 +616,7 @@ class AutotrackerSettings(PropertyGroup):
             min=1,
             max=100
             )
-    small_tracks = IntProperty(
+    small_tracks: IntProperty(
             name="Minimum track length",
             description="Delete tracks shorter than this number of frames\n"
                         "Note: set to 0 for keeping all tracks",
@@ -581,14 +624,14 @@ class AutotrackerSettings(PropertyGroup):
             min=1,
             max=1000
             )
-    frame_separation = IntProperty(
+    frame_separation: IntProperty(
             name="Frame Separation",
             description="How often new features are generated",
             default=5,
             min=1,
             max=100
             )
-    jump_cut = FloatProperty(
+    jump_cut: FloatProperty(
             name="Jump Cut",
             description="How much distance a marker can travel before it is considered "
                         "to be a bad track and cut.\nA new track wil be added "
@@ -597,7 +640,7 @@ class AutotrackerSettings(PropertyGroup):
             min=0.0,
             max=50.0
             )
-    track_backwards = BoolProperty(
+    track_backwards: BoolProperty(
             name="AutoTrack Backwards",
             description="Track from the last frame of the selected clip",
             default=False
@@ -608,7 +651,7 @@ class AutotrackerSettings(PropertyGroup):
             ("INSIDE_GPENCIL", "Inside Grease Pencil", "", 2),
             ("OUTSIDE_GPENCIL", "Outside Grease Pencil", "", 3),
             ]
-    placement_list = EnumProperty(
+    placement_list: EnumProperty(
             name="Placement",
             description="Feature Placement",
             items=list_items
@@ -620,12 +663,10 @@ class AutotrackerSettings(PropertyGroup):
     All size properties are in percent of the clip size,
     so presets do not depend on the clip size
 """
-
-
-class AutotrackerPanel(Panel):
+class AT_PT_Panel(Panel):
     """Creates a Panel in the Render Layer properties window"""
     bl_label = "Autotrack"
-    bl_idname = "autotrack"
+    # bl_idname = "autotrack"
     bl_space_type = 'CLIP_EDITOR'
     bl_region_type = 'TOOLS'
     bl_category = "Track"
@@ -643,40 +684,47 @@ class AutotrackerPanel(Panel):
         row.operator("tracking.auto_track", text="Autotrack!     ", icon='PLAY')
 
         row = layout.row()
-        row.prop(wm.autotracker_props, "track_backwards")
+        row.prop(wm.autotracker, "track_backwards")
 
         row = layout.row()
         col = layout.column(align=True)
-        col.prop(wm.autotracker_props, "delete_threshold")
-        col.prop(wm.autotracker_props, "small_tracks")
-        col.prop(wm.autotracker_props, "frame_separation", text="Frame Separation")
-        col.prop(wm.autotracker_props, "jump_cut", text="Jump Threshold")
+        col.prop(wm.autotracker, "delete_threshold")
+        col.prop(wm.autotracker, "small_tracks")
+        col.prop(wm.autotracker, "frame_separation", text="Frame Separation")
+        col.prop(wm.autotracker, "jump_cut", text="Jump Threshold")
 
         row = layout.row()
         row.label(text="Detect Features Settings:")
         col = layout.column(align=True)
-        col.prop(wm.autotracker_props, "df_margin", text="Margin:")
-        col.prop(wm.autotracker_props, "df_distance", text="Distance:")
-        col.prop(wm.autotracker_props, "df_threshold", text="Threshold:")
+        col.prop(wm.autotracker, "df_margin", text="Margin:")
+        col.prop(wm.autotracker, "df_distance", text="Distance:")
+        col.prop(wm.autotracker, "df_threshold", text="Threshold:")
 
         row = layout.row()
         row.label(text="Feature Placement:")
         col = layout.column(align=True)
-        col.prop(wm.autotracker_props, "placement_list", text="")
+        col.prop(wm.autotracker, "placement_list", text="")
+
+
+classes = (
+    AT_OP_Tracking,
+    AT_Settings,
+    AT_PT_Panel,
+    )
 
 
 def register():
-    bpy.utils.register_class(AutotrackerSettings)
-    WindowManager.autotracker_props = PointerProperty(
-                                            type=AutotrackerSettings
-                                            )
-    bpy.utils.register_module(__name__)
+    from  bpy.utils import register_class
+    for cls in classes:
+        register_class(cls)
+    WindowManager.autotracker = PointerProperty(type=AT_Settings)
 
 
 def unregister():
-    bpy.utils.unregister_class(AutotrackerSettings)
-    bpy.utils.unregister_module(__name__)
-    del WindowManager.autotracker_props
+    from  bpy.utils import unregister_class
+    for cls in classes:
+        unregister_class(cls)
+    del WindowManager.autotracker
 
 
 if __name__ == "__main__":
